@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# env / secrets
+.env
+.env.local
+.env.*
+!.env.example
+
+# sync artifacts
+tmp/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

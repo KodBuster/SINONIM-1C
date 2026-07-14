@@ -1,0 +1,18 @@
+{
+  "name": "sinonim-1c-cron",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hourly FTP CSV → AdvantShop import for Sinonim",
+  "type": "module",
+  "scripts": {
+    "start": "node sync.mjs",
+    "sync": "node sync.mjs",
+    "sync:dry": "node sync.mjs --dry-run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "basic-ftp": "^5.0.5"
+  }
+}

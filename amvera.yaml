@@ -1,0 +1,15 @@
+# Amvera Cron Job — https://docs.amvera.ru/cron/cronjobs.html
+# Расписание задаётся в ЛК Amvera (не в этом файле), например: 0 0 * * * ?
+# Важно: время сервера UTC (−3 к Москве)
+
+meta:
+  environment: node
+  toolchain:
+    name: npm
+    version: "20"
+
+build:
+  additionalCommands: npm ci --omit=dev
+
+run:
+  command: node sync.mjs
