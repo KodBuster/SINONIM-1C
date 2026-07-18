@@ -78,11 +78,15 @@ const config = {
     amount: process.env.SYNC_SRC_AMOUNT || "Amount",
     price: process.env.SYNC_SRC_PRICE || "Price",
   },
-  // offer-sku (default): ArtNo=артикул модификации — как ключ обновления в CSV 2.0
-  // multioffer: ArtNo родителя + MultiOffer (CSV 1.0) — создаёт новые, если родителя нет в магазине
-  // csv2: Артикул;Артикул модификации;Количество;Цена (ручной админ-импорт)
-  outFormat: (process.env.SYNC_OUT_FORMAT || "offer-sku").toLowerCase(),
+  // offer-sku / multioffer / csv2 — см. transform. POST в importproducts по умолчанию ВЫКЛ:
+  // этот endpoint создаёт товары и не обновляет модификации (проверено на каталоге Sinonim).
+  outFormat: (process.env.SYNC_OUT_FORMAT || "csv2").toLowerCase(),
   maxRows: Number(process.env.SYNC_MAX_ROWS || 0) || 0,
+  postEnabled:
+    String(process.env.SYNC_POST_ENABLED || "false").toLowerCase() === "true",
+  abortOnCreate:
+    String(process.env.SYNC_ABORT_ON_CREATE || "true").toLowerCase() !==
+    "false",
   dst: {
     artNo: process.env.SYNC_DST_ARTNO || "ArtNo",
     offer: process.env.SYNC_DST_OFFER || "MultiOffer",
@@ -136,8 +140,12 @@ async function main() {
   console.log(`[sync] prepared AdvantShop CSV: ${outPath}`);
   console.log(`[sync] rows: ${countDataRows(advantCsv)}`);
 
-  if (dryRun) {
-    console.log("[sync] dry-run: upload skipped");
+  if (dryRun || !config.postEnabled) {
+    console.log(
+      dryRun
+        ? "[sync] dry-run: upload skipped"
+        : "[sync] SYNC_POST_ENABLED!=true: upload skipped (safe mode). CSV ready for admin CSV 2.0 import.",
+    );
     console.log(advantCsv.split(/\r?\n/).slice(0, 6).join("\n"));
     return;
   }
@@ -152,11 +160,12 @@ async function main() {
   const added = (responseText.match(/Товар добавлен/gi) || []).length;
   const updated = (responseText.match(/Товар обновлен/gi) || []).length;
   if (added) {
-    console.warn(
-      `[sync] WARNING: AdvantShop created ${added} new product(s)` +
+    console.error(
+      `[sync] FATAL: AdvantShop created ${added} new product(s)` +
         (updated ? `, updated ${updated}` : "") +
-        ". Check ArtNo matching (offer-sku vs parent).",
+        ". /api/1c/importproducts does not match modification ArtNo. Aborting.",
     );
+    if (config.abortOnCreate) process.exit(1);
   }
 
   writeFileSync(hashPath, hash, "utf8");
