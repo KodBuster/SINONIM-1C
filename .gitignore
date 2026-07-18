@@ -10,7 +10,10 @@ node_modules/
 # sync artifacts
 tmp/
 stocks.csv
+advantshop-import.csv
+advantshop-import-1251.csv
 *.log
+.~lock.*
 
 # OS / IDE
 .DS_Store

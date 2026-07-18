@@ -45,6 +45,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import iconv from "iconv-lite";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = __dirname;
@@ -81,6 +82,8 @@ const config = {
   // offer-sku / multioffer / csv2 — см. transform. POST в importproducts по умолчанию ВЫКЛ:
   // этот endpoint создаёт товары и не обновляет модификации (проверено на каталоге Sinonim).
   outFormat: (process.env.SYNC_OUT_FORMAT || "csv2").toLowerCase(),
+  // utf8 (с BOM) | windows-1251 — ручной образец Sinonim был UTF-8 BOM
+  outEncoding: (process.env.SYNC_OUT_ENCODING || "utf8").toLowerCase(),
   maxRows: Number(process.env.SYNC_MAX_ROWS || 0) || 0,
   postEnabled:
     String(process.env.SYNC_POST_ENABLED || "false").toLowerCase() === "true",
@@ -136,8 +139,10 @@ async function main() {
 
   const advantCsv = transformToAdvantShopCsv(text);
   const outPath = join(config.workDir, "advantshop-import.csv");
-  writeFileSync(outPath, advantCsv, "utf8");
+  const outBuf = encodeCsvOutput(advantCsv);
+  writeFileSync(outPath, outBuf);
   console.log(`[sync] prepared AdvantShop CSV: ${outPath}`);
+  console.log(`[sync] encoding: ${config.outEncoding}`);
   console.log(`[sync] rows: ${countDataRows(advantCsv)}`);
 
   if (dryRun || !config.postEnabled) {
@@ -152,7 +157,7 @@ async function main() {
 
   const importUrl = resolveImportUrl();
   console.log(`[sync] posting to: ${maskUrl(importUrl)}`);
-  const responseText = await postCsvToAdvantShop(importUrl, advantCsv);
+  const responseText = await postCsvToAdvantShop(importUrl, outBuf);
   writeFileSync(join(config.workDir, "last-response.txt"), responseText, "utf8");
   console.log("[sync] AdvantShop response:");
   console.log(responseText.slice(0, 2000) || "(empty)");
@@ -232,8 +237,11 @@ function resolveImportUrl() {
   return url.toString();
 }
 
-async function postCsvToAdvantShop(importUrl, csvText) {
+async function postCsvToAdvantShop(importUrl, csvBody) {
   const mode = (process.env.SYNC_POST_MODE || "multipart").toLowerCase();
+  const isWin1251 = config.outEncoding.includes("1251");
+  const charset = isWin1251 ? "windows-1251" : "utf-8";
+  const buf = Buffer.isBuffer(csvBody) ? csvBody : encodeCsvOutput(String(csvBody));
 
   /** @type {RequestInit} */
   let init;
@@ -241,15 +249,15 @@ async function postCsvToAdvantShop(importUrl, csvText) {
     init = {
       method: "POST",
       headers: {
-        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Type": `text/csv; charset=${charset}`,
       },
-      body: csvText,
+      body: buf,
     };
   } else {
     const form = new FormData();
     form.append(
       "file",
-      new Blob([csvText], { type: "text/csv;charset=utf-8" }),
+      new Blob([buf], { type: `text/csv; charset=${charset}` }),
       "import.csv",
     );
     init = { method: "POST", body: form };
@@ -261,6 +269,18 @@ async function postCsvToAdvantShop(importUrl, csvText) {
     throw new Error(`AdvantShop HTTP ${response.status}: ${text.slice(0, 500)}`);
   }
   return text;
+}
+
+/** @param {string} csvText */
+function encodeCsvOutput(csvText) {
+  const enc = config.outEncoding.replace(/_/g, "-");
+  if (enc === "windows-1251" || enc === "cp1251" || enc === "win1251") {
+    // без BOM — типично для ANSI/1251 в Excel/AdvantShop
+    return iconv.encode(csvText.replace(/^\uFEFF/, ""), "win1251");
+  }
+  // utf8 с BOM
+  const withBom = csvText.startsWith("\uFEFF") ? csvText : `\uFEFF${csvText}`;
+  return Buffer.from(withBom, "utf8");
 }
 
 function transformToAdvantShopCsv(sourceText) {
@@ -333,8 +353,8 @@ function transformToAdvantShopCsv(sourceText) {
 
   console.log(`[sync] out format: ${formatLabel}`);
 
-  // UTF-8 BOM помогает Excel/некоторым парсерам Windows
-  return `\uFEFF${csv}`;
+  // BOM для utf8 добавляется в encodeCsvOutput
+  return csv;
 }
 
 /**

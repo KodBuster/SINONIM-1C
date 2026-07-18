@@ -13,6 +13,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "basic-ftp": "^5.0.5"
+    "basic-ftp": "^5.0.5",
+    "iconv-lite": "^0.7.3"
   }
 }
