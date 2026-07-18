@@ -78,8 +78,11 @@ const config = {
     amount: process.env.SYNC_SRC_AMOUNT || "Amount",
     price: process.env.SYNC_SRC_PRICE || "Price",
   },
-  // multioffer = CSV 1.0 для API 1C; columns = плоские колонки (только админ CSV 2.0)
-  outFormat: (process.env.SYNC_OUT_FORMAT || "multioffer").toLowerCase(),
+  // offer-sku (default): ArtNo=артикул модификации — как ключ обновления в CSV 2.0
+  // multioffer: ArtNo родителя + MultiOffer (CSV 1.0) — создаёт новые, если родителя нет в магазине
+  // csv2: Артикул;Артикул модификации;Количество;Цена (ручной админ-импорт)
+  outFormat: (process.env.SYNC_OUT_FORMAT || "offer-sku").toLowerCase(),
+  maxRows: Number(process.env.SYNC_MAX_ROWS || 0) || 0,
   dst: {
     artNo: process.env.SYNC_DST_ARTNO || "ArtNo",
     offer: process.env.SYNC_DST_OFFER || "MultiOffer",
@@ -145,6 +148,16 @@ async function main() {
   writeFileSync(join(config.workDir, "last-response.txt"), responseText, "utf8");
   console.log("[sync] AdvantShop response:");
   console.log(responseText.slice(0, 2000) || "(empty)");
+
+  const added = (responseText.match(/Товар добавлен/gi) || []).length;
+  const updated = (responseText.match(/Товар обновлен/gi) || []).length;
+  if (added) {
+    console.warn(
+      `[sync] WARNING: AdvantShop created ${added} new product(s)` +
+        (updated ? `, updated ${updated}` : "") +
+        ". Check ArtNo matching (offer-sku vs parent).",
+    );
+  }
 
   writeFileSync(hashPath, hash, "utf8");
   console.log("[sync] done");
@@ -285,26 +298,53 @@ function transformToAdvantShopCsv(sourceText) {
     throw new Error("No valid data rows after transform");
   }
 
-  const csv =
-    config.outFormat === "columns"
-      ? buildColumnsCsv(rows)
-      : buildMultiOfferCsv(rows);
+  if (config.maxRows > 0) {
+    rows.splice(config.maxRows);
+    console.log(`[sync] SYNC_MAX_ROWS=${config.maxRows}, using ${rows.length} row(s)`);
+  }
 
-  console.log(`[sync] out format: ${config.outFormat === "columns" ? "columns" : "multioffer (CSV 1.0)"}`);
+  let csv;
+  let formatLabel;
+  switch (config.outFormat) {
+    case "multioffer":
+      csv = buildMultiOfferCsv(rows);
+      formatLabel = "multioffer (CSV 1.0 parent+offers)";
+      break;
+    case "csv2":
+    case "columns":
+      csv = buildCsv2Columns(rows);
+      formatLabel = "csv2 (Артикул;Артикул модификации;…)";
+      break;
+    case "offer-sku":
+    default:
+      csv = buildOfferSkuCsv(rows);
+      formatLabel = "offer-sku (ArtNo=модификация;Amount;Price)";
+      break;
+  }
+
+  console.log(`[sync] out format: ${formatLabel}`);
 
   // UTF-8 BOM помогает Excel/некоторым парсерам Windows
   return `\uFEFF${csv}`;
 }
 
-/** Плоские колонки (как ручной CSV 2.0) — /api/1c/importproducts их обычно не понимает. */
-function buildColumnsCsv(rows) {
-  const outHeader = [
-    config.dst.artNo,
-    config.dst.offer,
-    config.dst.amount,
-    config.dst.price,
-  ];
-  const outRows = [outHeader.join(";")];
+/**
+ * Ключ = артикул модификации (OfferArtNo), как в CSV 2.0 при обновлении.
+ * Для /api/1c/importproducts: AdvantShop ищет оффер/товар по ArtNo.
+ */
+function buildOfferSkuCsv(rows) {
+  const outRows = ["ArtNo;Amount;Price"];
+  for (const row of rows) {
+    outRows.push(
+      [escapeCsv(row.offer), escapeCsv(row.amount), escapeCsv(row.price)].join(";"),
+    );
+  }
+  return `${outRows.join("\r\n")}\r\n`;
+}
+
+/** Как ручной образец: Артикул;Артикул модификации;Количество;Цена */
+function buildCsv2Columns(rows) {
+  const outRows = ["Артикул;Артикул модификации;Количество;Цена"];
   for (const row of rows) {
     outRows.push(
       [
@@ -319,8 +359,7 @@ function buildColumnsCsv(rows) {
 }
 
 /**
- * CSV 1.0 для API 1C: ArtNo + MultiOffer
- * MultiOffer = [offer:size:color:price:purchaseprice:amount],…
+ * CSV 1.0: ArtNo родителя + MultiOffer
  * @see https://www.advantshop.net/help/pages/import-csv
  */
 function buildMultiOfferCsv(rows) {
