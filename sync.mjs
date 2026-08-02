@@ -433,7 +433,7 @@ function transformToAdvantShopCsv(sourceText) {
   }
 
   /** @type {{ artNo: string, offer: string, amount: string, price: string, weight: string, set: string }[]} */
-  const rows = [];
+  const rawRows = [];
   for (const line of lines.slice(1)) {
     const cols = parseCsvLine(line, delimiter);
     const artNo = (cols[idx.artNo] || "").trim();
@@ -444,11 +444,19 @@ function transformToAdvantShopCsv(sourceText) {
       idx.weight >= 0 ? String(cols[idx.weight] ?? "").trim() : "";
     const set = idx.set >= 0 ? String(cols[idx.set] ?? "").trim() : "";
     if (!artNo) continue;
-    rows.push({ artNo, offer, amount, price, weight, set });
+    rawRows.push({ artNo, offer, amount, price, weight, set });
   }
+
+  const { rows, duplicateKeys } = dedupeStockRows(rawRows);
 
   if (!rows.length) {
     throw new Error("No valid data rows after transform");
+  }
+
+  if (duplicateKeys.length) {
+    console.warn(
+      `[sync] collapsed ${duplicateKeys.length} duplicate ArtNo+OfferArtNo: ${duplicateKeys.join(", ")}`,
+    );
   }
 
   if (config.maxRows > 0) {
@@ -653,6 +661,31 @@ function normalizeNumber(value) {
     .trim()
     .replace(/\s/g, "")
     .replace(",", ".");
+}
+
+/**
+ * 1С иногда отдаёт несколько строк с одним ArtNo+OfferArtNo (разный Weight).
+ * Повторный импорт таких дублей в AdvantShop сбивает «Главная» у модификации → цена 0 на витрине.
+ * Оставляем последнюю строку по ключу (как в актуальном остатке AdvantShop).
+ */
+function dedupeStockRows(rows) {
+  /** @type {Map<string, (typeof rows)[number]>} */
+  const byKey = new Map();
+  /** @type {Set<string>} */
+  const seenDupes = new Set();
+
+  for (const row of rows) {
+    const key = `${row.artNo}\0${row.offer}`;
+    if (byKey.has(key)) {
+      seenDupes.add(`${row.artNo}/${row.offer}`);
+    }
+    byKey.set(key, row);
+  }
+
+  return {
+    rows: [...byKey.values()],
+    duplicateKeys: [...seenDupes],
+  };
 }
 
 function countDataRows(csv) {
