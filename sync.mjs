@@ -2,7 +2,7 @@
  * 1С CSV (FTP) → AdvantShop `/api/1c/importproducts`
  *
  * Ожидаемые колонки в файле 1С (разделитель ; или ,):
- *   ArtNo;OfferArtNo;Amount;Price
+ *   ArtNo;OfferArtNo;Amount;Price;Weight;Set
  *   (имена можно переименовать через env)
  *
  * AdvantShop URL берётся со страницы:
@@ -32,11 +32,13 @@
  *   SYNC_SRC_OFFER=OfferArtNo
  *   SYNC_SRC_AMOUNT=Amount
  *   SYNC_SRC_PRICE=Price
+ *   SYNC_SRC_WEIGHT=Weight
+ *   SYNC_SRC_SET=Set
  *   # Выход для /api/1c/importproducts = CSV 1.0 MultiOffer (по умолчанию):
  *   #   ArtNo;MultiOffer
  *   #   802-02763;[802-02763-7:7::15635::2]
- *   # Ручной админ-импорт CSV 2.0 (Артикул;Артикул модификации;…) API НЕ понимает.
- *   # SYNC_OUT_FORMAT=multioffer|columns
+ *   # Ручной админ-импорт CSV 2.0 (Артикул;Артикул модификации;…;Свойство: Вес, гр.;Свойство: Set)
+ *   # SYNC_OUT_FORMAT=multioffer|columns|csv2
  *   SYNC_SKIP_IF_UNCHANGED=true
  *   SYNC_WORK_DIR=./tmp/1c-sync
  */
@@ -82,6 +84,8 @@ const config = {
     offer: process.env.SYNC_SRC_OFFER || "OfferArtNo",
     amount: process.env.SYNC_SRC_AMOUNT || "Amount",
     price: process.env.SYNC_SRC_PRICE || "Price",
+    weight: process.env.SYNC_SRC_WEIGHT || "Weight",
+    set: process.env.SYNC_SRC_SET || "Set",
   },
   // offer-sku / multioffer / csv2 — см. transform. POST в importproducts по умолчанию ВЫКЛ:
   // этот endpoint создаёт товары и не обновляет модификации (проверено на каталоге Sinonim).
@@ -416,17 +420,19 @@ function transformToAdvantShopCsv(sourceText) {
     offer: findColumnIndex(header, config.src.offer),
     amount: findColumnIndex(header, config.src.amount),
     price: findColumnIndex(header, config.src.price),
+    weight: findColumnIndex(header, config.src.weight),
+    set: findColumnIndex(header, config.src.set),
   };
 
-  for (const [key, value] of Object.entries(idx)) {
-    if (value < 0) {
+  for (const key of ["artNo", "offer", "amount", "price"]) {
+    if (idx[key] < 0) {
       throw new Error(
         `Column "${config.src[key]}" not found. Header: ${header.join(" | ")}`,
       );
     }
   }
 
-  /** @type {{ artNo: string, offer: string, amount: string, price: string }[]} */
+  /** @type {{ artNo: string, offer: string, amount: string, price: string, weight: string, set: string }[]} */
   const rows = [];
   for (const line of lines.slice(1)) {
     const cols = parseCsvLine(line, delimiter);
@@ -434,8 +440,11 @@ function transformToAdvantShopCsv(sourceText) {
     const offer = (cols[idx.offer] || "").trim() || artNo;
     const amount = normalizeNumber(cols[idx.amount]);
     const price = normalizeNumber(cols[idx.price]);
+    const weight =
+      idx.weight >= 0 ? String(cols[idx.weight] ?? "").trim() : "";
+    const set = idx.set >= 0 ? String(cols[idx.set] ?? "").trim() : "";
     if (!artNo) continue;
-    rows.push({ artNo, offer, amount, price });
+    rows.push({ artNo, offer, amount, price, weight, set });
   }
 
   if (!rows.length) {
@@ -532,9 +541,11 @@ function buildOfferSkuCsv(rows) {
   return `${outRows.join("\r\n")}\r\n`;
 }
 
-/** Как ручной образец: Артикул;Артикул модификации;Количество;Цена */
+/** Как ручной образец + свойства из stocks: Вес, гр. и Set */
 function buildCsv2Columns(rows) {
-  const outRows = ["Артикул;Артикул модификации;Количество;Цена"];
+  const outRows = [
+    "Артикул;Артикул модификации;Количество;Цена;Свойство: Вес, гр.;Свойство: Set",
+  ];
   for (const row of rows) {
     outRows.push(
       [
@@ -542,6 +553,8 @@ function buildCsv2Columns(rows) {
         escapeCsv(row.offer),
         escapeCsv(row.amount),
         escapeCsv(row.price),
+        escapeCsv(row.weight ?? ""),
+        escapeCsv(row.set ?? ""),
       ].join(";"),
     );
   }
