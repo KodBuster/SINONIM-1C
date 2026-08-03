@@ -51,7 +51,8 @@ import iconv from "iconv-lite";
 import {
   classifyImportArts,
   importCsvViaAdmin,
-  fetchOfferSizeColorMap,
+  syncStocksViaAdminOffers,
+  buildSetPropertyCsv,
 } from "./admin-import.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -191,73 +192,19 @@ async function main() {
   }
 
   const { csv: baseCsv, rows: syncRows } = transformToAdvantShopCsv(text);
-  let advantCsv = baseCsv;
-  let rowsForImport = syncRows;
-
-  // CSV без «Размер» затирает размеры в AdvantShop. Подмешиваем текущие Размер/Цвет из карточек.
-  if (
-    (config.outFormat === "csv2" || config.outFormat === "columns") &&
-    config.admin.email &&
-    config.admin.password
-  ) {
-    try {
-      const meta = await fetchOfferSizeColorMap({
-        adminBaseUrl: config.admin.baseUrl,
-        email: config.admin.email,
-        password: config.admin.password,
-        parentArtNos: syncRows.map((r) => r.artNo),
-        log: console.log,
-      });
-      rowsForImport = syncRows.map((row) => {
-        const found = meta.get(String(row.offer || "").trim().toLowerCase());
-        return {
-          ...row,
-          size: found?.size ?? "",
-          color: found?.color ?? "",
-        };
-      });
-      const withSize = rowsForImport.filter((r) => r.size).length;
-      console.log(
-        `[sync] size/color from AdvantShop: ${withSize}/${rowsForImport.length} offers have Size`,
-      );
-      if (withSize === 0) {
-        console.warn(
-          "[sync] WARNING: no Size values loaded — import may clear sizes in AdvantShop",
-        );
-      }
-      advantCsv = buildCsv2Columns(rowsForImport);
-    } catch (error) {
-      console.warn(
-        `[sync] size/color enrich failed (${error?.message || error}); importing without Size column`,
-      );
-    }
-  }
-
   const outPath = join(config.workDir, "advantshop-import.csv");
-  const outBuf = encodeCsvOutput(advantCsv);
-  writeFileSync(outPath, outBuf);
-  console.log(`[sync] prepared AdvantShop CSV: ${outPath}`);
+  // Keep a CSV snapshot for debugging; admin mode no longer imports it for offers.
+  writeFileSync(outPath, encodeCsvOutput(baseCsv));
+  console.log(`[sync] prepared snapshot CSV: ${outPath}`);
   console.log(`[sync] encoding: ${config.outEncoding}`);
-  console.log(`[sync] rows: ${countDataRows(advantCsv)}`);
+  console.log(`[sync] rows: ${syncRows.length}`);
 
   if (dryRun || !config.postEnabled) {
     console.log(
       dryRun
-        ? "[sync] dry-run: upload skipped"
+        ? "[sync] dry-run: will use admin updateOffer (no CSV offer import)"
         : "[sync] upload skipped (set ADVANTSHOP_ADMIN_PASSWORD or SYNC_POST_ENABLED=true)",
     );
-    const preview = advantCsv
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .filter(
-        (line, idx) =>
-          idx === 0 ||
-          line.includes("191-025010") ||
-          idx < 4,
-      )
-      .slice(0, 12);
-    console.log(preview.join("\n"));
-    return;
   }
 
   if (config.uploadMode === "admin") {
@@ -268,7 +215,7 @@ async function main() {
           "Проверьте, что переменные в ЭТОМ Cron Job (Варшава), этап Запуск, и контейнеры перезапущены.",
       );
     }
-    console.log(`[sync] admin import via ${config.admin.baseUrl}/adminv3/import`);
+
     let missingAction = config.admin.missingAction;
     if (config.maxRows > 0 && missingAction !== "none" && missingAction !== "0") {
       console.warn(
@@ -277,28 +224,64 @@ async function main() {
       );
       missingAction = "none";
     }
-    const stats = await importCsvViaAdmin({
+
+    console.log(
+      `[sync] admin offer sync via ${config.admin.baseUrl}/adminv3/product/updateOffer`,
+    );
+    const stats = await syncStocksViaAdminOffers({
       adminBaseUrl: config.admin.baseUrl,
       email: config.admin.email,
       password: config.admin.password,
-      csvBuffer: outBuf,
-      filename: "stocks-import.csv",
-      encoding: config.outEncoding,
-      onlyUpdateProducts: config.admin.onlyUpdate,
-      productActionType: missingAction,
+      rows: syncRows,
+      zeroMissing: missingAction === "zero" || missingAction === "3" || missingAction === "zero_stock" || missingAction === "zero-stock",
+      dryRun: dryRun || !config.postEnabled,
       log: console.log,
     });
+
+    // Set — отдельный CSV только со свойством, без размеров/модификаций/цены.
+    if (
+      !dryRun &&
+      config.postEnabled &&
+      Array.isArray(stats.setRows) &&
+      stats.setRows.length
+    ) {
+      const setCsv = buildSetPropertyCsv(stats.setRows);
+      const setPath = join(config.workDir, "advantshop-set-only.csv");
+      writeFileSync(setPath, encodeCsvOutput(setCsv));
+      console.log(
+        `[sync] importing Set property for ${stats.setRows.length} product(s) (no sizes/offers)`,
+      );
+      try {
+        const setStats = await importCsvViaAdmin({
+          adminBaseUrl: config.admin.baseUrl,
+          email: config.admin.email,
+          password: config.admin.password,
+          csvBuffer: encodeCsvOutput(setCsv),
+          filename: "stocks-set-only.csv",
+          encoding: config.outEncoding,
+          onlyUpdateProducts: true,
+          productActionType: "none",
+          log: console.log,
+        });
+        console.log(
+          `[sync] Set import done: update=${setStats.Update || 0} error=${setStats.Error || 0}`,
+        );
+      } catch (error) {
+        console.warn(
+          `[sync] Set property import failed: ${error?.message || error}`,
+        );
+      }
+    }
+
     writeFileSync(
       join(config.workDir, "last-response.txt"),
       JSON.stringify(
         {
-          Add: stats.Add,
           Update: stats.Update,
           Error: stats.Error,
           updatedArts: stats.updatedArts,
-          addedArts: stats.addedArts,
           zeroedArts: stats.zeroedArts,
-          zeroStockActionRan: stats.zeroStockActionRan,
+          notFoundArts: stats.notFoundArts,
           errorLines: stats.errorLines,
         },
         null,
@@ -306,29 +289,38 @@ async function main() {
       ),
       "utf8",
     );
-    if (stats.logText) {
-      writeFileSync(join(config.workDir, "last-import-log.txt"), stats.logText, "utf8");
-    }
-    const added = Number(stats.Add || 0);
-    const updated = Number(stats.Update || 0);
-    const errors = Number(stats.Error || 0);
+
     console.log(
-      `[sync] admin done: add=${added} update=${updated} error=${errors}`,
+      `[sync] admin done: update=${stats.Update || 0} zeroed=${(stats.zeroedArts || []).length} error=${stats.Error || 0}`,
     );
-    logArtResults(rowsForImport, stats);
-    if (added > 0 && config.abortOnCreate) {
-      console.error(
-        `[sync] FATAL: admin import created ${added} product(s); enable OnlyUpdateProducts / check mapping`,
+    logArtResults(syncRows, {
+      updatedArts: stats.updatedArts,
+      zeroedArts: stats.zeroedArts,
+      errorLines: stats.errorLines,
+    });
+    if ((stats.zeroedArts || []).length) {
+      console.log(
+        `[sync] обнулены остатки (${stats.zeroedArts.length}): ${stats.zeroedArts.join(", ")}`,
       );
-      process.exit(1);
     }
-    if (errors > 0) {
-      console.warn(`[sync] admin reported ${errors} error row(s)`);
+    if ((stats.errorLines || []).length) {
+      console.warn(`[sync] admin reported ${stats.errorLines.length} error(s)`);
+    }
+
+    if (dryRun || !config.postEnabled) {
+      return;
     }
   } else {
+    if (dryRun || !config.postEnabled) {
+      console.log(baseCsv.split(/\r?\n/).slice(0, 6).join("\n"));
+      return;
+    }
     const importUrl = resolveImportUrl();
     console.log(`[sync] posting to: ${maskUrl(importUrl)}`);
-    const responseText = await postCsvToAdvantShop(importUrl, outBuf);
+    const responseText = await postCsvToAdvantShop(
+      importUrl,
+      encodeCsvOutput(baseCsv),
+    );
     writeFileSync(join(config.workDir, "last-response.txt"), responseText, "utf8");
     console.log("[sync] AdvantShop response:");
     console.log(responseText.slice(0, 2000) || "(empty)");

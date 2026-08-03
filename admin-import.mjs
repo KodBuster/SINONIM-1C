@@ -309,11 +309,303 @@ function pickMetaLabel(value) {
   return "";
 }
 
+function extractTokenFromHtml(html) {
+  return (
+    html.match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i)?.[1] ||
+    html.match(/value="([^"]+)"[^>]*name="__RequestVerificationToken"/i)?.[1] ||
+    ""
+  );
+}
+
+async function fetchProductEditToken(apiBase, jar, productId) {
+  const res = await fetch(`${apiBase}/product/edit/${productId}`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      Cookie: cookieHeader(jar),
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Referer: `${apiBase}/catalog?showMethod=AllProducts`,
+    },
+  });
+  mergeCookies(jar, res);
+  const html = await res.text();
+  const token = extractTokenFromHtml(html);
+  if (!token) {
+    throw new Error(`antiforgery token missing on product/edit/${productId}`);
+  }
+  return token;
+}
+
+/**
+ * Обновляет остаток/цену/вес оффера через admin updateOffer.
+ * Size/Color/Main не меняем — CSV-импорт их ломает.
+ */
+export async function syncStocksViaAdminOffers({
+  adminBaseUrl,
+  email,
+  password,
+  rows,
+  zeroMissing = true,
+  dryRun = false,
+  log = console.log,
+}) {
+  const root = adminBaseUrl.replace(/\/$/, "");
+  const apiBase = `${root}/adminv3`;
+  const jar = new Map();
+
+  await adminLogin(root, email, password, jar);
+  const bootstrapToken = await fetchAntiforgeryToken(apiBase, jar);
+
+  const catalogUrl =
+    `${apiBase}/catalog/getcatalog?ItemsPerPage=999999&Page=1` +
+    `&categoryId=0&search=&showMethod=AllProducts`;
+  const catalogRes = await fetch(catalogUrl, {
+    headers: {
+      ...authHeaders(jar, bootstrapToken),
+      Referer: `${apiBase}/catalog?showMethod=AllProducts`,
+    },
+  });
+  const catalogJson = await catalogRes.json();
+  const products = catalogJson?.DataItems || catalogJson?.obj?.DataItems || [];
+  log(`[sync] admin catalog: ${products.length} product(s)`);
+
+  /** @type {Map<number, any>} */
+  const productById = new Map();
+  /** @type {Map<string, number>} */
+  const productIdByArt = new Map();
+  for (const product of products) {
+    const art = String(
+      product.ProductArtNo ?? product.ArtNo ?? product.artNo ?? "",
+    ).trim();
+    const id = Number(product.ProductId ?? product.productId ?? 0);
+    if (!art || !id) continue;
+    productById.set(id, product);
+    productIdByArt.set(art.toLowerCase(), id);
+  }
+
+  /** @type {Map<string, { productId: number, offer: any }>} */
+  const offerByArt = new Map();
+  /** @type {Map<number, any[]>} */
+  const offersByProduct = new Map();
+
+  for (const productId of productById.keys()) {
+    const offersUrl =
+      `${apiBase}/product/getOffers?ItemsPerPage=999&Page=1&ProductId=${productId}`;
+    const offersRes = await fetch(offersUrl, {
+      headers: {
+        ...authHeaders(jar, bootstrapToken),
+        Referer: `${apiBase}/product/edit/${productId}`,
+      },
+    });
+    const offersText = await offersRes.text();
+    let offersJson;
+    try {
+      offersJson = JSON.parse(offersText);
+    } catch {
+      log(`[sync] getOffers failed productId=${productId}: ${offersText.slice(0, 120)}`);
+      continue;
+    }
+    const offers = offersJson?.DataItems || offersJson?.obj?.DataItems || [];
+    offersByProduct.set(productId, offers);
+    for (const offer of offers) {
+      const offerArt = String(offer.ArtNo ?? "").trim();
+      if (!offerArt) continue;
+      offerByArt.set(offerArt.toLowerCase(), { productId, offer });
+    }
+  }
+  log(`[sync] admin offers loaded: ${offerByArt.size}`);
+
+  /** @type {Map<number, string>} */
+  const tokenByProduct = new Map();
+  async function tokenFor(productId) {
+    if (!tokenByProduct.has(productId)) {
+      tokenByProduct.set(
+        productId,
+        await fetchProductEditToken(apiBase, jar, productId),
+      );
+    }
+    return tokenByProduct.get(productId);
+  }
+
+  async function postUpdateOffer(productId, offerPayload) {
+    const token = await tokenFor(productId);
+    const res = await fetch(`${apiBase}/product/updateOffer`, {
+      method: "POST",
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        Cookie: cookieHeader(jar),
+        "X-Requested-With": "XMLHttpRequest",
+        Accept: "application/json, text/plain, */*",
+        "Content-Type": "application/json;charset=utf-8",
+        __RequestVerificationToken: token,
+        Referer: `${apiBase}/product/edit/${productId}`,
+      },
+      body: JSON.stringify(offerPayload),
+    });
+    const text = await res.text();
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `updateOffer HTTP ${res.status} productId=${productId}: ${text.slice(0, 200)}`,
+      );
+    }
+    if (json?.result === false || json?.Result === false) {
+      const err = (json.errors || json.Errors || []).join("; ") || text.slice(0, 200);
+      throw new Error(`updateOffer failed productId=${productId}: ${err}`);
+    }
+    return json;
+  }
+
+  const stocksByOffer = new Map();
+  for (const row of rows) {
+    const key = String(row.offer || row.artNo || "")
+      .trim()
+      .toLowerCase();
+    if (!key) continue;
+    stocksByOffer.set(key, row);
+  }
+
+  const updated = [];
+  const notFound = [];
+  const zeroed = [];
+  const errors = [];
+  /** @type {Map<string, { weight: string, set: string }>} */
+  const productProps = new Map();
+
+  for (const [offerKey, row] of stocksByOffer) {
+    const found = offerByArt.get(offerKey);
+    if (!found) {
+      notFound.push(row.offer || row.artNo);
+      continue;
+    }
+
+    const next = { ...found.offer };
+    const amount = Number(String(row.amount ?? "").replace(",", "."));
+    const price = Number(String(row.price ?? "").replace(",", "."));
+    if (Number.isFinite(amount)) next.Amount = amount;
+    if (Number.isFinite(price)) {
+      next.BasePrice = price;
+      if ("Price" in next) next.Price = price;
+    }
+    if (row.weight != null && String(row.weight).trim() !== "") {
+      const weightNum = Number(String(row.weight).replace(",", "."));
+      next.Weight = Number.isFinite(weightNum) ? weightNum : row.weight;
+    }
+
+    const parentArt = String(row.artNo || "").trim();
+    if (parentArt) {
+      productProps.set(parentArt.toLowerCase(), {
+        weight: String(row.weight ?? "").trim(),
+        set: String(row.set ?? "").trim(),
+      });
+    }
+
+    const changed =
+      Number(found.offer.Amount) !== Number(next.Amount) ||
+      Number(found.offer.BasePrice) !== Number(next.BasePrice) ||
+      String(found.offer.Weight ?? "") !== String(next.Weight ?? "");
+
+    if (!changed) {
+      updated.push(next.ArtNo);
+      continue;
+    }
+
+    if (dryRun) {
+      log(
+        `[sync] dry-run updateOffer ${next.ArtNo}: amount ${found.offer.Amount}→${next.Amount}, price ${found.offer.BasePrice}→${next.BasePrice}, weight ${found.offer.Weight}→${next.Weight}`,
+      );
+      updated.push(next.ArtNo);
+      continue;
+    }
+
+    try {
+      await postUpdateOffer(found.productId, next);
+      updated.push(next.ArtNo);
+    } catch (error) {
+      errors.push(`${next.ArtNo}: ${error?.message || error}`);
+      log(`[sync] ERROR updateOffer ${next.ArtNo}: ${error?.message || error}`);
+    }
+  }
+
+  if (zeroMissing) {
+    for (const [offerKey, found] of offerByArt) {
+      if (stocksByOffer.has(offerKey)) continue;
+      const amountNow = Number(found.offer.Amount ?? 0);
+      if (!Number.isFinite(amountNow) || amountNow === 0) continue;
+
+      const next = { ...found.offer, Amount: 0 };
+      if (dryRun) {
+        log(`[sync] dry-run zero ${next.ArtNo}: amount ${amountNow}→0`);
+        zeroed.push(next.ArtNo);
+        continue;
+      }
+      try {
+        await postUpdateOffer(found.productId, next);
+        zeroed.push(next.ArtNo);
+      } catch (error) {
+        errors.push(`${next.ArtNo} zero: ${error?.message || error}`);
+        log(`[sync] ERROR zero ${next.ArtNo}: ${error?.message || error}`);
+      }
+    }
+  }
+
+  // Set — свойство товара. Вес уже пишем в offer.Weight.
+  // CSV для свойств без модификаций (только Артикул + Set).
+  const setRows = [];
+  for (const [artKey, props] of productProps) {
+    if (!props.set) continue;
+    const artNo =
+      [...productIdByArt.entries()].find(([k]) => k === artKey)?.[0] || artKey;
+    // restore original casing from stocks rows
+    const sample = rows.find(
+      (r) => String(r.artNo || "").trim().toLowerCase() === artKey,
+    );
+    setRows.push({
+      artNo: sample?.artNo || artNo,
+      set: props.set,
+    });
+  }
+
+  log(
+    `[sync] offers updated=${updated.length} zeroed=${zeroed.length} notFound=${notFound.length} errors=${errors.length}`,
+  );
+  if (notFound.length) {
+    log(`[sync] not found in AdvantShop (${notFound.length}): ${notFound.join(", ")}`);
+  }
+
+  return {
+    updatedArts: updated,
+    zeroedArts: zeroed,
+    notFoundArts: notFound,
+    errorLines: errors,
+    setRows,
+    Update: updated.length,
+    Add: 0,
+    Error: errors.length,
+  };
+}
+
+/**
+ * CSV только для свойства Set (без модификаций/размеров/цены/остатка).
+ */
+export function buildSetPropertyCsv(setRows) {
+  const out = ["Артикул;Свойство: Set"];
+  for (const row of setRows) {
+    out.push(`${escapeCsvSimple(row.artNo)};${escapeCsvSimple(row.set)}`);
+  }
+  return `${out.join("\r\n")}\r\n`;
+}
+
+function escapeCsvSimple(value) {
+  const s = String(value ?? "");
+  if (/[;"\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
 /**
  * Читает текущие Размер/Цвет модификаций из админки AdvantShop.
- * Нужно, чтобы CSV-импорт stocks не затирал размеры (колонка «Размер» обязана
- * присутствовать со значениями из карточки — суффикс OfferArtNo размером не является).
- *
+ * @deprecated CSV с Size всё равно ломает карточку — используйте syncStocksViaAdminOffers.
  * @returns {Promise<Map<string, { size: string, color: string, productId: number }>>}
  */
 export async function fetchOfferSizeColorMap({
