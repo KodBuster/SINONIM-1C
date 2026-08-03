@@ -457,6 +457,38 @@ export async function syncStocksViaAdminOffers({
     return json;
   }
 
+  /**
+   * Если у товара есть хотя бы один оффер с цветом, AdvantShop требует Color
+   * на каждом updateOffer («Укажите цвет»). Подставляем Color/ColorId
+   * с соседнего оффера, не трогая Size.
+   */
+  function withRequiredColor(offer, productId) {
+    const hasColorId =
+      offer.ColorId != null && offer.ColorId !== 0 && offer.ColorId !== "";
+    const hasColorName = String(offer.Color ?? "").trim() !== "";
+    if (hasColorId || hasColorName) return offer;
+
+    const siblings = offersByProduct.get(productId) || [];
+    const donor =
+      siblings.find(
+        (o) =>
+          o !== offer &&
+          o.ColorId != null &&
+          o.ColorId !== 0 &&
+          o.ColorId !== "",
+      ) ||
+      siblings.find(
+        (o) => o !== offer && String(o.Color ?? "").trim() !== "",
+      );
+    if (!donor) return offer;
+
+    return {
+      ...offer,
+      ColorId: donor.ColorId,
+      Color: donor.Color ?? offer.Color,
+    };
+  }
+
   const stocksByOffer = new Map();
   for (const row of rows) {
     const key = String(row.offer || row.artNo || "")
@@ -520,7 +552,10 @@ export async function syncStocksViaAdminOffers({
     }
 
     try {
-      await postUpdateOffer(found.productId, next);
+      await postUpdateOffer(
+        found.productId,
+        withRequiredColor(next, found.productId),
+      );
       updated.push(next.ArtNo);
     } catch (error) {
       errors.push(`${next.ArtNo}: ${error?.message || error}`);
@@ -534,7 +569,10 @@ export async function syncStocksViaAdminOffers({
       const amountNow = Number(found.offer.Amount ?? 0);
       if (!Number.isFinite(amountNow) || amountNow === 0) continue;
 
-      const next = { ...found.offer, Amount: 0 };
+      const next = withRequiredColor(
+        { ...found.offer, Amount: 0 },
+        found.productId,
+      );
       if (dryRun) {
         log(`[sync] dry-run zero ${next.ArtNo}: amount ${amountNow}→0`);
         zeroed.push(next.ArtNo);
