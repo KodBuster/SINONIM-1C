@@ -295,6 +295,121 @@ export function describeProductAction(type) {
   );
 }
 
+function pickMetaLabel(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "string" || typeof value === "number") {
+    const s = String(value).trim();
+    return s === "----" || s === "—" ? "" : s;
+  }
+  if (typeof value === "object") {
+    const nested =
+      value.Name ?? value.name ?? value.SizeName ?? value.ColorName ?? value.Value;
+    return pickMetaLabel(nested);
+  }
+  return "";
+}
+
+/**
+ * Читает текущие Размер/Цвет модификаций из админки AdvantShop.
+ * Нужно, чтобы CSV-импорт stocks не затирал размеры (колонка «Размер» обязана
+ * присутствовать со значениями из карточки — суффикс OfferArtNo размером не является).
+ *
+ * @returns {Promise<Map<string, { size: string, color: string, productId: number }>>}
+ */
+export async function fetchOfferSizeColorMap({
+  adminBaseUrl,
+  email,
+  password,
+  parentArtNos = [],
+  log = console.log,
+}) {
+  const root = adminBaseUrl.replace(/\/$/, "");
+  const apiBase = `${root}/adminv3`;
+  const jar = new Map();
+  const wantedParents = new Set(
+    parentArtNos.map((a) => String(a || "").trim().toLowerCase()).filter(Boolean),
+  );
+
+  await adminLogin(root, email, password, jar);
+  const token = await fetchAntiforgeryToken(apiBase, jar);
+
+  const catalogUrl =
+    `${apiBase}/catalog/getcatalog?ItemsPerPage=999999&Page=1` +
+    `&categoryId=0&search=&showMethod=AllProducts`;
+  const catalogRes = await fetch(catalogUrl, {
+    headers: {
+      ...authHeaders(jar, token),
+      Referer: `${apiBase}/catalog?showMethod=AllProducts`,
+    },
+  });
+  const catalogText = await catalogRes.text();
+  let catalogJson;
+  try {
+    catalogJson = JSON.parse(catalogText);
+  } catch {
+    throw new Error(
+      `admin getcatalog HTTP ${catalogRes.status}: ${catalogText.slice(0, 300)}`,
+    );
+  }
+  const products = catalogJson?.DataItems || catalogJson?.obj?.DataItems || [];
+  log(`[sync] admin catalog: ${products.length} product(s)`);
+
+  /** @type {Map<string, number>} */
+  const productIdByArt = new Map();
+  for (const product of products) {
+    const art = String(
+      product.ProductArtNo ?? product.ArtNo ?? product.artNo ?? "",
+    ).trim();
+    const id = Number(product.ProductId ?? product.productId ?? 0);
+    if (!art || !id) continue;
+    const key = art.toLowerCase();
+    if (wantedParents.size && !wantedParents.has(key)) continue;
+    productIdByArt.set(key, id);
+  }
+
+  if (wantedParents.size && productIdByArt.size === 0) {
+    log("[sync] admin: no catalog products matched stocks ArtNo list");
+  }
+
+  /** @type {Map<string, { size: string, color: string, productId: number }>} */
+  const offerMap = new Map();
+  const productIds = [...new Set(productIdByArt.values())];
+
+  for (const productId of productIds) {
+    const offersUrl =
+      `${apiBase}/product/getOffers?ItemsPerPage=999&Page=1&ProductId=${productId}`;
+    const offersRes = await fetch(offersUrl, {
+      headers: {
+        ...authHeaders(jar, token),
+        Referer: `${apiBase}/product/edit/${productId}`,
+      },
+    });
+    const offersText = await offersRes.text();
+    let offersJson;
+    try {
+      offersJson = JSON.parse(offersText);
+    } catch {
+      log(
+        `[sync] admin getOffers productId=${productId} HTTP ${offersRes.status}: ${offersText.slice(0, 120)}`,
+      );
+      continue;
+    }
+    const offers = offersJson?.DataItems || offersJson?.obj?.DataItems || [];
+    for (const offer of offers) {
+      const offerArt = String(offer.ArtNo ?? offer.artNo ?? "").trim();
+      if (!offerArt) continue;
+      offerMap.set(offerArt.toLowerCase(), {
+        size: pickMetaLabel(offer.Size ?? offer.size ?? offer.SizeName),
+        color: pickMetaLabel(offer.Color ?? offer.color ?? offer.ColorName),
+        productId,
+      });
+    }
+  }
+
+  log(`[sync] admin offers meta: ${offerMap.size} offer(s) with size/color`);
+  return offerMap;
+}
+
 /**
  * AdvantShop log lines look like:
  *   Товар обновлен: 802-03159

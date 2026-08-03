@@ -51,6 +51,7 @@ import iconv from "iconv-lite";
 import {
   classifyImportArts,
   importCsvViaAdmin,
+  fetchOfferSizeColorMap,
 } from "./admin-import.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -189,7 +190,49 @@ async function main() {
     }
   }
 
-  const { csv: advantCsv, rows: syncRows } = transformToAdvantShopCsv(text);
+  const { csv: baseCsv, rows: syncRows } = transformToAdvantShopCsv(text);
+  let advantCsv = baseCsv;
+  let rowsForImport = syncRows;
+
+  // CSV без «Размер» затирает размеры в AdvantShop. Подмешиваем текущие Размер/Цвет из карточек.
+  if (
+    (config.outFormat === "csv2" || config.outFormat === "columns") &&
+    config.admin.email &&
+    config.admin.password
+  ) {
+    try {
+      const meta = await fetchOfferSizeColorMap({
+        adminBaseUrl: config.admin.baseUrl,
+        email: config.admin.email,
+        password: config.admin.password,
+        parentArtNos: syncRows.map((r) => r.artNo),
+        log: console.log,
+      });
+      rowsForImport = syncRows.map((row) => {
+        const found = meta.get(String(row.offer || "").trim().toLowerCase());
+        return {
+          ...row,
+          size: found?.size ?? "",
+          color: found?.color ?? "",
+        };
+      });
+      const withSize = rowsForImport.filter((r) => r.size).length;
+      console.log(
+        `[sync] size/color from AdvantShop: ${withSize}/${rowsForImport.length} offers have Size`,
+      );
+      if (withSize === 0) {
+        console.warn(
+          "[sync] WARNING: no Size values loaded — import may clear sizes in AdvantShop",
+        );
+      }
+      advantCsv = buildCsv2Columns(rowsForImport);
+    } catch (error) {
+      console.warn(
+        `[sync] size/color enrich failed (${error?.message || error}); importing without Size column`,
+      );
+    }
+  }
+
   const outPath = join(config.workDir, "advantshop-import.csv");
   const outBuf = encodeCsvOutput(advantCsv);
   writeFileSync(outPath, outBuf);
@@ -203,7 +246,17 @@ async function main() {
         ? "[sync] dry-run: upload skipped"
         : "[sync] upload skipped (set ADVANTSHOP_ADMIN_PASSWORD or SYNC_POST_ENABLED=true)",
     );
-    console.log(advantCsv.split(/\r?\n/).slice(0, 6).join("\n"));
+    const preview = advantCsv
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .filter(
+        (line, idx) =>
+          idx === 0 ||
+          line.includes("191-025010") ||
+          idx < 4,
+      )
+      .slice(0, 12);
+    console.log(preview.join("\n"));
     return;
   }
 
@@ -262,7 +315,7 @@ async function main() {
     console.log(
       `[sync] admin done: add=${added} update=${updated} error=${errors}`,
     );
-    logArtResults(syncRows, stats);
+    logArtResults(rowsForImport, stats);
     if (added > 0 && config.abortOnCreate) {
       console.error(
         `[sync] FATAL: admin import created ${added} product(s); enable OnlyUpdateProducts / check mapping`,
@@ -549,16 +602,18 @@ function buildOfferSkuCsv(rows) {
   return `${outRows.join("\r\n")}\r\n`;
 }
 
-/** Как ручной образец + свойства из stocks: Вес, гр. и Set */
+/** CSV 2.0: цена/остаток/вес/Set + Размер/Цвет из карточки AdvantShop (чтобы не затереть). */
 function buildCsv2Columns(rows) {
   const outRows = [
-    "Артикул;Артикул модификации;Количество;Цена;Свойство: Вес, гр.;Свойство: Set",
+    "Артикул;Артикул модификации;Размер;Цвет;Количество;Цена;Свойство: Вес, гр.;Свойство: Set",
   ];
   for (const row of rows) {
     outRows.push(
       [
         escapeCsv(row.artNo),
         escapeCsv(row.offer),
+        escapeCsv(row.size ?? ""),
+        escapeCsv(row.color ?? ""),
         escapeCsv(row.amount),
         escapeCsv(row.price),
         escapeCsv(row.weight ?? ""),
