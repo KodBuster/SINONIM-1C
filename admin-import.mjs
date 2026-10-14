@@ -106,12 +106,60 @@ function cookieHeader(jar) {
   return [...jar.values()].join("; ");
 }
 
+/** undici connect timeout по умолчанию 10s — с Amvera (особенно не-МСК) часто мало. */
+const ADMIN_FETCH_TIMEOUT_MS = Number(
+  process.env.SYNC_ADMIN_FETCH_TIMEOUT_MS || 60_000,
+);
+
+let adminDispatcherPromise;
+async function getAdminDispatcher() {
+  if (!adminDispatcherPromise) {
+    adminDispatcherPromise = import("undici")
+      .then(
+        ({ Agent }) =>
+          new Agent({
+            connect: { timeout: ADMIN_FETCH_TIMEOUT_MS },
+            headersTimeout: ADMIN_FETCH_TIMEOUT_MS,
+            bodyTimeout: ADMIN_FETCH_TIMEOUT_MS,
+          }),
+      )
+      .catch(() => null);
+  }
+  return adminDispatcherPromise;
+}
+
+async function adminFetch(url, init = {}) {
+  const dispatcher = await getAdminDispatcher();
+  try {
+    return await fetch(url, {
+      ...init,
+      ...(dispatcher ? { dispatcher } : {}),
+      signal: init.signal ?? AbortSignal.timeout(ADMIN_FETCH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    const cause = error?.cause;
+    const causeMsg =
+      cause instanceof Error
+        ? `${cause.name}: ${cause.message}`
+        : cause
+          ? String(cause)
+          : error?.message || String(error);
+    throw new Error(
+      `AdvantShop admin unreachable (${url}): ${causeMsg}. ` +
+        `Проверьте регион Cron Job (нужна Москва) и доступ к my.advantshop.net:443.`,
+      { cause: error },
+    );
+  }
+}
+
 async function adminLogin(root, email, password, jar) {
   const loginUrl = `${root}/adminv2/login`;
-  const page = await fetch(loginUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+  const page = await adminFetch(loginUrl, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
   mergeCookies(jar, page);
 
-  const res = await fetch(loginUrl, {
+  const res = await adminFetch(loginUrl, {
     method: "POST",
     redirect: "manual",
     headers: {
@@ -131,7 +179,7 @@ async function adminLogin(root, email, password, jar) {
 
   for (let i = 0; i < 8 && loc; i += 1) {
     const url = loc.startsWith("http") ? loc : new URL(loc, root).href;
-    const r = await fetch(url, {
+    const r = await adminFetch(url, {
       redirect: "manual",
       headers: { "User-Agent": "Mozilla/5.0", Cookie: cookieHeader(jar) },
     });
@@ -141,7 +189,7 @@ async function adminLogin(root, email, password, jar) {
 }
 
 async function fetchAntiforgeryToken(apiBase, jar) {
-  const res = await fetch(`${apiBase}/import`, {
+  const res = await adminFetch(`${apiBase}/import`, {
     headers: { "User-Agent": "Mozilla/5.0", Cookie: cookieHeader(jar) },
   });
   mergeCookies(jar, res);
@@ -172,7 +220,7 @@ async function uploadCsvFile(apiBase, jar, token, csvBuffer, filename) {
   );
   form.append("rnd", String(Math.random()));
 
-  const res = await fetch(`${apiBase}/import/uploadCsvFile`, {
+  const res = await adminFetch(`${apiBase}/import/uploadCsvFile`, {
     method: "POST",
     headers: {
       ...authHeaders(jar, token),
@@ -193,7 +241,7 @@ async function uploadCsvFile(apiBase, jar, token, csvBuffer, filename) {
 }
 
 async function postJson(apiBase, jar, token, path, data) {
-  const res = await fetch(`${apiBase}/${path.replace(/^\//, "")}`, {
+  const res = await adminFetch(`${apiBase}/${path.replace(/^\//, "")}`, {
     method: "POST",
     headers: {
       ...authHeaders(jar, token),
@@ -245,7 +293,7 @@ async function waitForImport(apiBase, jar, token, { pollMs, pollTimeoutMs, log }
 }
 
 async function fetchImportLogFile(apiBase, jar, token) {
-  const res = await fetch(`${apiBase}/ExportImportCommon/getlogfile`, {
+  const res = await adminFetch(`${apiBase}/ExportImportCommon/getlogfile`, {
     headers: {
       ...authHeaders(jar, token),
       Referer: `${apiBase}/import`,
@@ -318,7 +366,7 @@ function extractTokenFromHtml(html) {
 }
 
 async function fetchProductEditToken(apiBase, jar, productId) {
-  const res = await fetch(`${apiBase}/product/edit/${productId}`, {
+  const res = await adminFetch(`${apiBase}/product/edit/${productId}`, {
     headers: {
       "User-Agent": "Mozilla/5.0",
       Cookie: cookieHeader(jar),
@@ -358,7 +406,7 @@ export async function syncStocksViaAdminOffers({
   const catalogUrl =
     `${apiBase}/catalog/getcatalog?ItemsPerPage=999999&Page=1` +
     `&categoryId=0&search=&showMethod=AllProducts`;
-  const catalogRes = await fetch(catalogUrl, {
+  const catalogRes = await adminFetch(catalogUrl, {
     headers: {
       ...authHeaders(jar, bootstrapToken),
       Referer: `${apiBase}/catalog?showMethod=AllProducts`,
@@ -390,7 +438,7 @@ export async function syncStocksViaAdminOffers({
   for (const productId of productById.keys()) {
     const offersUrl =
       `${apiBase}/product/getOffers?ItemsPerPage=999&Page=1&ProductId=${productId}`;
-    const offersRes = await fetch(offersUrl, {
+    const offersRes = await adminFetch(offersUrl, {
       headers: {
         ...authHeaders(jar, bootstrapToken),
         Referer: `${apiBase}/product/edit/${productId}`,
@@ -428,7 +476,7 @@ export async function syncStocksViaAdminOffers({
 
   async function postUpdateOffer(productId, offerPayload) {
     const token = await tokenFor(productId);
-    const res = await fetch(`${apiBase}/product/updateOffer`, {
+    const res = await adminFetch(`${apiBase}/product/updateOffer`, {
       method: "POST",
       headers: {
         "User-Agent": "Mozilla/5.0",
@@ -666,7 +714,7 @@ export async function fetchOfferSizeColorMap({
   const catalogUrl =
     `${apiBase}/catalog/getcatalog?ItemsPerPage=999999&Page=1` +
     `&categoryId=0&search=&showMethod=AllProducts`;
-  const catalogRes = await fetch(catalogUrl, {
+  const catalogRes = await adminFetch(catalogUrl, {
     headers: {
       ...authHeaders(jar, token),
       Referer: `${apiBase}/catalog?showMethod=AllProducts`,
@@ -708,7 +756,7 @@ export async function fetchOfferSizeColorMap({
   for (const productId of productIds) {
     const offersUrl =
       `${apiBase}/product/getOffers?ItemsPerPage=999&Page=1&ProductId=${productId}`;
-    const offersRes = await fetch(offersUrl, {
+    const offersRes = await adminFetch(offersUrl, {
       headers: {
         ...authHeaders(jar, token),
         Referer: `${apiBase}/product/edit/${productId}`,
