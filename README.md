@@ -20,23 +20,25 @@ npm run sync:dry -- --file samples/1c-stocks.sample.csv
 npm run sync
 ```
 
-## GitHub Actions (рабочий sync, пока Amvera режет AdvantShop)
+## Рабочая схема (две сети)
 
-Amvera Cron Job (Москва) **резолвит** `my.advantshop.net` → `85.92.118.90`, **качает FTP**, но **таймаутит** на TCP/443 к AdvantShop (~60с). IPv6 нет (`AAAA=-`). Это сетевой egress, не логин.
+| Кто | До FTP 1С | До AdvantShop admin |
+|-----|-----------|---------------------|
+| Amvera Cron | да | нет (таймаут :443) |
+| GitHub Actions | нет (таймаут) | да |
 
-Пока Amvera не откроет outbound 443 к `85.92.118.90`:
+Поэтому:
 
-1. Репозиторий → **Settings → Secrets and variables → Actions**
-2. Добавить секреты из `.env.example` (те же имена: `ADVANTSHOP_*`, `FTP_*`)
-3. **Actions → Sync stocks → Run workflow** (или ждать schedule `*/5 * * * *`)
-4. В Amvera Cron Job можно **выключить расписание**, чтобы не жечь запуски впустую
+1. **Amvera** — только релей: FTP → commit `data/stocks-latest.csv` в GitHub  
+   Env: `SYNC_UPLOAD_MODE=relay-github`, `FTP_*`, `SYNC_GITHUB_TOKEN` (PAT: Contents write + Actions write на этот репо)
+2. **GitHub Actions** — `data/stocks-latest.csv` → AdvantShop admin  
+   Secrets: `ADVANTSHOP_ADMIN_EMAIL`, `ADVANTSHOP_ADMIN_PASSWORD`, `ADVANTSHOP_ADMIN_URL`
 
-Текст в поддержку Amvera:
+PAT: GitHub → Settings → Developer settings → Fine-grained token → только `KodBuster/SINONIM-1C` → Contents: Read and write, Actions: Read and write.
 
-> Cron Job (регион Москва). DNS `my.advantshop.net` → A=`85.92.118.90`, AAAA нет.
-> FTP наружу работает. HTTPS к `https://my.advantshop.net/.../adminv2/login`
-> (TCP 443 → 85.92.118.90) таймаутит ~60с из контейнера Cron Job.
-> Нужен outbound TCP/443 к этому IP. Логи: `admin probe FAILED … timeout`.
+Текст в поддержку Amvera (опционально, чтобы вернуть всё на Amvera):
+
+> Cron Job Москва. DNS `my.advantshop.net` → `85.92.118.90`. FTP ок. HTTPS :443 таймаут ~60с. Нужен outbound TCP/443.
 
 ## Amvera
 

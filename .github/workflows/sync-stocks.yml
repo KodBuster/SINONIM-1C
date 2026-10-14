@@ -1,11 +1,14 @@
-# Amvera Cron Job не достучится до my.advantshop.net:443.
-# Обход: GitHub Actions (runners ходят на AdvantShop).
+# Amvera не ходит на AdvantShop:443. GitHub Actions не ходит на FTP 1С.
+# Схема: Amvera (SYNC_UPLOAD_MODE=relay-github) → data/stocks-latest.csv → этот workflow → admin.
 name: Sync stocks (FTP → AdvantShop)
 
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+  push:
+    paths:
+      - "data/stocks-latest.csv"
 
 concurrency:
   group: sync-stocks
@@ -27,44 +30,36 @@ jobs:
 
       - name: Check required secrets
         env:
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USER }}
-          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
           ADVANTSHOP_ADMIN_EMAIL: ${{ secrets.ADVANTSHOP_ADMIN_EMAIL }}
           ADVANTSHOP_ADMIN_PASSWORD: ${{ secrets.ADVANTSHOP_ADMIN_PASSWORD }}
         run: |
           missing=()
-          for k in FTP_HOST FTP_USER FTP_PASSWORD ADVANTSHOP_ADMIN_EMAIL ADVANTSHOP_ADMIN_PASSWORD; do
+          for k in ADVANTSHOP_ADMIN_EMAIL ADVANTSHOP_ADMIN_PASSWORD; do
             if [ -z "${!k}" ]; then missing+=("$k"); fi
           done
-          echo "FTP_HOST=${FTP_HOST:+set}" 
-          echo "FTP_USER=${FTP_USER:+set}"
-          echo "FTP_PASSWORD=${FTP_PASSWORD:+set(len=${#FTP_PASSWORD})}"
           echo "ADVANTSHOP_ADMIN_EMAIL=${ADVANTSHOP_ADMIN_EMAIL:+set}"
           echo "ADVANTSHOP_ADMIN_PASSWORD=${ADVANTSHOP_ADMIN_PASSWORD:+set(len=${#ADVANTSHOP_ADMIN_PASSWORD})}"
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::Missing repository secrets: ${missing[*]}"
-            echo "Add them at: Settings → Secrets and variables → Actions (repository secrets, exact names)."
             exit 1
           fi
+          if [ ! -f data/stocks-latest.csv ]; then
+            echo "::error::data/stocks-latest.csv missing. Amvera must run with SYNC_UPLOAD_MODE=relay-github first."
+            exit 1
+          fi
+          echo "stocks file: $(wc -c < data/stocks-latest.csv) bytes"
 
       - name: Run sync
         env:
           ADVANTSHOP_BASE_URL: ${{ secrets.ADVANTSHOP_BASE_URL || 'https://shop.synonym-jewelry.ru' }}
           ADVANTSHOP_SERVER_API_KEY: ${{ secrets.ADVANTSHOP_SERVER_API_KEY }}
-          ADVANTSHOP_ADMIN_URL: ${{ secrets.ADVANTSHOP_ADMIN_URL || 'https://my.advantshop.net/437286-kfbw' }}
+          ADVANTSHOP_ADMIN_URL: ${{ secrets.ADVANTSHOP_ADMIN_URL }}
           ADVANTSHOP_ADMIN_EMAIL: ${{ secrets.ADVANTSHOP_ADMIN_EMAIL }}
           ADVANTSHOP_ADMIN_PASSWORD: ${{ secrets.ADVANTSHOP_ADMIN_PASSWORD }}
-          FTP_HOST: ${{ secrets.FTP_HOST }}
-          FTP_USER: ${{ secrets.FTP_USER }}
-          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
-          FTP_REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH || '/stocks.csv' }}
-          FTP_PORT: ${{ secrets.FTP_PORT || '2131' }}
-          FTP_SECURE: ${{ secrets.FTP_SECURE || 'false' }}
           SYNC_UPLOAD_MODE: admin
           SYNC_OUT_FORMAT: csv2
           SYNC_OUT_ENCODING: utf8
           SYNC_ADMIN_ONLY_UPDATE: "true"
           SYNC_POST_ENABLED: "true"
           SYNC_SKIP_IF_UNCHANGED: "true"
-        run: node sync.mjs
+        run: node sync.mjs --file data/stocks-latest.csv

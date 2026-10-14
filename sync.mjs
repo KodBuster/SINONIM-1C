@@ -99,8 +99,21 @@ const config = {
   // utf8 (с BOM) | windows-1251 — ручной образец Sinonim был UTF-8 BOM
   outEncoding: (process.env.SYNC_OUT_ENCODING || "utf8").toLowerCase(),
   maxRows: Number(process.env.SYNC_MAX_ROWS || 0) || 0,
-  // admin = CSV 2.0 через админку (рабочий путь); api = /api/1c/importproducts (ломает каталог)
+  // admin = CSV 2.0 через админку (рабочий путь)
+  // relay-github = только FTP → commit CSV в GitHub (Amvera); Actions потом делает admin
+  // api = /api/1c/importproducts (ломает каталог)
   uploadMode: (process.env.SYNC_UPLOAD_MODE || "admin").toLowerCase(),
+  githubRelay: {
+    token: envTrim("SYNC_GITHUB_TOKEN") || envTrim("GITHUB_TOKEN"),
+    repo: envTrim("SYNC_GITHUB_REPO") || "KodBuster/SINONIM-1C",
+    path: envTrim("SYNC_GITHUB_PATH") || "data/stocks-latest.csv",
+    branch: envTrim("SYNC_GITHUB_BRANCH") || "main",
+    triggerWorkflow:
+      String(process.env.SYNC_GITHUB_TRIGGER_WORKFLOW || "true").toLowerCase() !==
+      "false",
+    workflowId:
+      envTrim("SYNC_GITHUB_WORKFLOW_ID") || "sync-stocks.yml",
+  },
   admin: {
     baseUrl: (
       process.env.ADVANTSHOP_ADMIN_URL ||
@@ -240,6 +253,19 @@ async function probeAdminConnectivity() {
 async function main() {
   logAdminEnvDiagnostics();
   mkdirSync(config.workDir, { recursive: true });
+
+  // Amvera: FTP ок, AdvantShop:443 нет. GitHub Actions: наоборот.
+  // relay-github только качает FTP и кладёт CSV в репозиторий.
+  if (config.uploadMode === "relay-github") {
+    const sourcePath = join(config.workDir, "from-ftp.csv");
+    assertFtpConfig();
+    await downloadFromFtp(sourcePath);
+    const raw = readFileSync(sourcePath);
+    await relayCsvToGithub(raw);
+    console.log("[sync] relay-github done");
+    return;
+  }
+
   if (config.uploadMode === "admin") {
     await probeAdminConnectivity();
   }
@@ -466,6 +492,82 @@ async function downloadFromFtp(destPath) {
   }
 
   console.log(`[sync] downloaded → ${destPath}`);
+}
+
+async function relayCsvToGithub(rawBuffer) {
+  const { token, repo, path, branch, triggerWorkflow, workflowId } =
+    config.githubRelay;
+  if (!token) {
+    throw new Error(
+      "relay-github requires SYNC_GITHUB_TOKEN (PAT: Contents write + Actions write)",
+    );
+  }
+  const contentB64 = Buffer.from(rawBuffer).toString("base64");
+  const hash = sha1(Buffer.isBuffer(rawBuffer) ? rawBuffer.toString("utf8") : String(rawBuffer));
+  const apiBase = `https://api.github.com/repos/${repo}`;
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "sinonim-1c-cron-relay",
+  };
+
+  const getUrl = `${apiBase}/contents/${path.replace(/^\//, "")}?ref=${encodeURIComponent(branch)}`;
+  const existingRes = await fetch(getUrl, { headers });
+  let sha;
+  if (existingRes.status === 200) {
+    const existing = await existingRes.json();
+    sha = existing.sha;
+    const prevRaw = Buffer.from(existing.content.replace(/\n/g, ""), "base64").toString("utf8");
+    if (config.skipIfUnchanged && sha1(prevRaw) === hash) {
+      console.log(`[sync] github ${repo}/${path}: unchanged, skip commit`);
+      return { skipped: true };
+    }
+  } else if (existingRes.status !== 404) {
+    const text = await existingRes.text();
+    throw new Error(
+      `GitHub GET contents failed HTTP ${existingRes.status}: ${text.slice(0, 300)}`,
+    );
+  }
+
+  const putRes = await fetch(`${apiBase}/contents/${path.replace(/^\//, "")}`, {
+    method: "PUT",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: `chore: stocks.csv from FTP (${hash.slice(0, 8)})`,
+      content: contentB64,
+      branch,
+      ...(sha ? { sha } : {}),
+    }),
+  });
+  if (!putRes.ok) {
+    const text = await putRes.text();
+    throw new Error(
+      `GitHub PUT contents failed HTTP ${putRes.status}: ${text.slice(0, 400)}`,
+    );
+  }
+  console.log(`[sync] github uploaded → ${repo}/${path} @ ${branch}`);
+
+  if (triggerWorkflow) {
+    const wfRes = await fetch(
+      `${apiBase}/actions/workflows/${workflowId}/dispatches`,
+      {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: branch }),
+      },
+    );
+    if (!wfRes.ok && wfRes.status !== 204) {
+      const text = await wfRes.text();
+      console.warn(
+        `[sync] workflow_dispatch failed HTTP ${wfRes.status}: ${text.slice(0, 300)}`,
+      );
+    } else {
+      console.log(`[sync] triggered workflow ${workflowId}`);
+    }
+  }
+
+  return { skipped: false };
 }
 
 function resolveImportUrl() {
