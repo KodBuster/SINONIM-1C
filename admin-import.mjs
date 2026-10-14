@@ -147,7 +147,7 @@ async function adminFetch(url, init = {}) {
           : error?.message || String(error);
     throw new Error(
       `AdvantShop admin unreachable (${url}): ${causeMsg}. ` +
-        `Проверьте регион Cron Job (нужна Москва) и доступ к my.advantshop.net:443.`,
+        `Нужен outbound TCP/443 к my.advantshop.net (IPv4).`,
       { cause: error },
     );
   }

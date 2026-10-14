@@ -194,18 +194,24 @@ async function probeAdminConnectivity() {
   }
 
   const loginUrl = `${config.admin.baseUrl}/adminv2/login`;
+  const timeoutMs = Number(process.env.SYNC_ADMIN_FETCH_TIMEOUT_MS || 60_000);
   const started = Date.now();
   try {
+    const { Agent } = await import("undici");
+    const dispatcher = new Agent({
+      connect: { timeout: timeoutMs, family: 4 },
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+    });
     const res = await fetch(loginUrl, {
       method: "GET",
       redirect: "manual",
       headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(
-        Number(process.env.SYNC_ADMIN_FETCH_TIMEOUT_MS || 60_000),
-      ),
+      dispatcher,
+      signal: AbortSignal.timeout(timeoutMs),
     });
     console.log(
-      `[sync] admin probe ${loginUrl} → HTTP ${res.status} in ${Date.now() - started}ms`,
+      `[sync] admin probe (IPv4) ${loginUrl} → HTTP ${res.status} in ${Date.now() - started}ms`,
     );
   } catch (error) {
     const cause = error?.cause;
@@ -219,9 +225,9 @@ async function probeAdminConnectivity() {
       `[sync] admin probe FAILED ${loginUrl} in ${Date.now() - started}ms: ${causeMsg}`,
     );
     console.error(
-      "[sync] Amvera не достучалась до AdvantShop admin. Напишите в поддержку Amvera: " +
-        "outbound TCP/443 к my.advantshop.net таймаутит из Cron Job (Москва). " +
-        "Временно можно запускать sync с машины, где admin открывается в браузере.",
+      "[sync] Amvera (Москва) не достучалась до AdvantShop admin по IPv4. " +
+        "Напишите в поддержку Amvera: outbound TCP/443 к my.advantshop.net (85.92.118.90) " +
+        "таймаутит из Cron Job. Временно — sync с ПК, где admin открывается в браузере.",
     );
   }
 }
