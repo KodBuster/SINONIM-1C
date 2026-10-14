@@ -108,17 +108,18 @@ const config = {
     repo: envTrim("SYNC_GITHUB_REPO") || "KodBuster/SINONIM-1C",
     path: envTrim("SYNC_GITHUB_PATH") || "data/stocks-latest.csv",
     branch: envTrim("SYNC_GITHUB_BRANCH") || "main",
+    // false: пусть срабатывает только push на data/stocks-latest.csv (без гонки cancel)
     triggerWorkflow:
-      String(process.env.SYNC_GITHUB_TRIGGER_WORKFLOW || "true").toLowerCase() !==
-      "false",
+      String(process.env.SYNC_GITHUB_TRIGGER_WORKFLOW || "false").toLowerCase() ===
+      "true",
     workflowId:
       envTrim("SYNC_GITHUB_WORKFLOW_ID") || "sync-stocks.yml",
   },
   admin: {
-    baseUrl: (
+    baseUrl: normalizeAdminBaseUrl(
       process.env.ADVANTSHOP_ADMIN_URL ||
-      "https://my.advantshop.net/437286-kfbw"
-    ).replace(/\/$/, ""),
+        "https://my.advantshop.net/437286-kfbw",
+    ),
     email: envTrim("ADVANTSHOP_ADMIN_EMAIL"),
     password: envTrim("ADVANTSHOP_ADMIN_PASSWORD"),
     onlyUpdate:
@@ -155,6 +156,28 @@ function envTrim(name) {
   return String(v).trim();
 }
 
+/** Корень магазина на my.advantshop.net, без /adminv2/login?... */
+function normalizeAdminBaseUrl(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "https://my.advantshop.net/437286-kfbw";
+  try {
+    const u = new URL(s);
+    // часто копируют адрес из браузера: .../adminv2/login?frompage=closed
+    u.hash = "";
+    u.search = "";
+    let path = u.pathname.replace(/\/+$/, "");
+    path = path.replace(/\/adminv\d+(?:\/.*)?$/i, "");
+    path = path.replace(/\/login$/i, "");
+    u.pathname = path || "/";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return s
+      .replace(/\/adminv\d+\/login.*/i, "")
+      .replace(/\/adminv\d+.*/i, "")
+      .replace(/\/$/, "");
+  }
+}
+
 function logAdminEnvDiagnostics() {
   const email = envTrim("ADVANTSHOP_ADMIN_EMAIL");
   const password = envTrim("ADVANTSHOP_ADMIN_PASSWORD");
@@ -165,6 +188,7 @@ function logAdminEnvDiagnostics() {
     `[sync] env: ADMIN_EMAIL=${email ? "set" : "MISSING"}` +
       ` ADMIN_PASSWORD=${password ? `set(len=${password.length})` : "MISSING"}` +
       ` ADMIN_URL=${envTrim("ADVANTSHOP_ADMIN_URL") ? "set" : "default"}` +
+      ` ADMIN_BASE=${config.admin.baseUrl}` +
       ` UPLOAD_MODE=${process.env.SYNC_UPLOAD_MODE || "admin(default)"}` +
       ` POST_ENABLED=${process.env.SYNC_POST_ENABLED ?? "(auto)"}` +
       ` ENCODING=${process.env.SYNC_OUT_ENCODING || "utf8(default)"}`,

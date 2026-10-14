@@ -1,5 +1,5 @@
 # Amvera не ходит на AdvantShop:443. GitHub Actions не ходит на FTP 1С.
-# Схема: Amvera (SYNC_UPLOAD_MODE=relay-github) → data/stocks-latest.csv → этот workflow → admin.
+# Схема: Amvera (SYNC_UPLOAD_MODE=relay-github) → push data/stocks-latest.csv → этот workflow → admin.
 name: Sync stocks (FTP → AdvantShop)
 
 on:
@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - uses: actions/setup-node@v4
         with:
@@ -28,10 +30,11 @@ jobs:
 
       - run: npm ci
 
-      - name: Check required secrets
+      - name: Check secrets and stocks file
         env:
           ADVANTSHOP_ADMIN_EMAIL: ${{ secrets.ADVANTSHOP_ADMIN_EMAIL }}
           ADVANTSHOP_ADMIN_PASSWORD: ${{ secrets.ADVANTSHOP_ADMIN_PASSWORD }}
+          ADVANTSHOP_ADMIN_URL: ${{ secrets.ADVANTSHOP_ADMIN_URL }}
         run: |
           missing=()
           for k in ADVANTSHOP_ADMIN_EMAIL ADVANTSHOP_ADMIN_PASSWORD; do
@@ -39,12 +42,19 @@ jobs:
           done
           echo "ADVANTSHOP_ADMIN_EMAIL=${ADVANTSHOP_ADMIN_EMAIL:+set}"
           echo "ADVANTSHOP_ADMIN_PASSWORD=${ADVANTSHOP_ADMIN_PASSWORD:+set(len=${#ADVANTSHOP_ADMIN_PASSWORD})}"
+          echo "ADVANTSHOP_ADMIN_URL=${ADVANTSHOP_ADMIN_URL:-MISSING}"
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::Missing repository secrets: ${missing[*]}"
             exit 1
           fi
+          ls -la data/ || true
           if [ ! -f data/stocks-latest.csv ]; then
-            echo "::error::data/stocks-latest.csv missing. Amvera must run with SYNC_UPLOAD_MODE=relay-github first."
+            echo "File missing after checkout — fetching from origin/main"
+            git fetch origin main
+            git checkout origin/main -- data/stocks-latest.csv || true
+          fi
+          if [ ! -f data/stocks-latest.csv ]; then
+            echo "::error::data/stocks-latest.csv missing. Wait for Amvera relay-github commit."
             exit 1
           fi
           echo "stocks file: $(wc -c < data/stocks-latest.csv) bytes"
