@@ -78,7 +78,11 @@ const config = {
     password: process.env.FTP_PASSWORD || "",
     remotePath: process.env.FTP_REMOTE_PATH || "/stocks.csv",
     secure: String(process.env.FTP_SECURE || "false").toLowerCase() === "true",
-    port: Number(process.env.FTP_PORT || 21),
+    // пустой секрет FTP_PORT="" даёт Number("")===0 — ломает connect
+    port: (() => {
+      const n = Number(process.env.FTP_PORT);
+      return Number.isFinite(n) && n > 0 ? n : 21;
+    })(),
   },
   delimiter: process.env.SYNC_CSV_DELIMITER || "",
   src: {
