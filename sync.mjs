@@ -156,7 +156,19 @@ function logAdminEnvDiagnostics() {
 }
 
 main().catch((error) => {
-  console.error("[sync] fatal:", error?.message || error);
+  const cause = error?.cause;
+  const causeMsg =
+    cause instanceof Error
+      ? `${cause.name}: ${cause.message}`
+      : cause
+        ? String(cause)
+        : "";
+  console.error(
+    "[sync] fatal:",
+    error?.message || error,
+    causeMsg ? `| cause: ${causeMsg}` : "",
+  );
+  if (error?.stack) console.error(error.stack);
   process.exit(1);
 });
 
