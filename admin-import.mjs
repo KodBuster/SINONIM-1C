@@ -118,7 +118,8 @@ async function getAdminDispatcher() {
       .then(
         ({ Agent }) =>
           new Agent({
-            connect: { timeout: ADMIN_FETCH_TIMEOUT_MS },
+            // Amvera иногда резолвит AAAA, а IPv6 до AdvantShop не ходит → ConnectTimeout.
+            connect: { timeout: ADMIN_FETCH_TIMEOUT_MS, family: 4 },
             headersTimeout: ADMIN_FETCH_TIMEOUT_MS,
             bodyTimeout: ADMIN_FETCH_TIMEOUT_MS,
           }),

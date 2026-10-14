@@ -172,9 +172,66 @@ main().catch((error) => {
   process.exit(1);
 });
 
+async function probeAdminConnectivity() {
+  const host = (() => {
+    try {
+      return new URL(config.admin.baseUrl).hostname;
+    } catch {
+      return "my.advantshop.net";
+    }
+  })();
+  try {
+    const { lookup } = await import("node:dns/promises");
+    const v4 = await lookup(host, { family: 4 }).catch(() => null);
+    const v6 = await lookup(host, { family: 6 }).catch(() => null);
+    console.log(
+      `[sync] DNS ${host}:` +
+        ` A=${v4?.address || "-"}` +
+        ` AAAA=${v6?.address || "-"}`,
+    );
+  } catch (error) {
+    console.warn(`[sync] DNS probe failed: ${error?.message || error}`);
+  }
+
+  const loginUrl = `${config.admin.baseUrl}/adminv2/login`;
+  const started = Date.now();
+  try {
+    const res = await fetch(loginUrl, {
+      method: "GET",
+      redirect: "manual",
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(
+        Number(process.env.SYNC_ADMIN_FETCH_TIMEOUT_MS || 60_000),
+      ),
+    });
+    console.log(
+      `[sync] admin probe ${loginUrl} → HTTP ${res.status} in ${Date.now() - started}ms`,
+    );
+  } catch (error) {
+    const cause = error?.cause;
+    const causeMsg =
+      cause instanceof Error
+        ? `${cause.name}: ${cause.message}`
+        : cause
+          ? String(cause)
+          : error?.message || String(error);
+    console.error(
+      `[sync] admin probe FAILED ${loginUrl} in ${Date.now() - started}ms: ${causeMsg}`,
+    );
+    console.error(
+      "[sync] Amvera не достучалась до AdvantShop admin. Напишите в поддержку Amvera: " +
+        "outbound TCP/443 к my.advantshop.net таймаутит из Cron Job (Москва). " +
+        "Временно можно запускать sync с машины, где admin открывается в браузере.",
+    );
+  }
+}
+
 async function main() {
   logAdminEnvDiagnostics();
   mkdirSync(config.workDir, { recursive: true });
+  if (config.uploadMode === "admin") {
+    await probeAdminConnectivity();
+  }
 
   const sourcePath = localFileArg
     ? resolve(localFileArg)
