@@ -225,9 +225,10 @@ async function probeAdminConnectivity() {
       `[sync] admin probe FAILED ${loginUrl} in ${Date.now() - started}ms: ${causeMsg}`,
     );
     console.error(
-      "[sync] Amvera (Москва) не достучалась до AdvantShop admin по IPv4. " +
-        "Напишите в поддержку Amvera: outbound TCP/443 к my.advantshop.net (85.92.118.90) " +
-        "таймаутит из Cron Job. Временно — sync с ПК, где admin открывается в браузере.",
+      "[sync] Host не достучался до AdvantShop admin (TCP/443). " +
+        "DNS ок, но connect таймаут → egress/firewall. " +
+        "Amvera: попросите открыть outbound 443 к 85.92.118.90. " +
+        "Обход: GitHub Actions workflow sync-stocks или npm run sync с ПК.",
     );
   }
 }

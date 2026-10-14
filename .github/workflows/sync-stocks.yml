@@ -1,0 +1,48 @@
+# Amvera Cron Job сейчас не достучится до my.advantshop.net:443 (таймаут).
+# Этот workflow — рабочий обход: GitHub runners ходят на AdvantShop нормально.
+name: Sync stocks (FTP → AdvantShop)
+
+on:
+  schedule:
+    # каждые 5 минут (UTC)
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-stocks
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run sync
+        env:
+          ADVANTSHOP_BASE_URL: ${{ secrets.ADVANTSHOP_BASE_URL }}
+          ADVANTSHOP_SERVER_API_KEY: ${{ secrets.ADVANTSHOP_SERVER_API_KEY }}
+          ADVANTSHOP_ADMIN_URL: ${{ secrets.ADVANTSHOP_ADMIN_URL }}
+          ADVANTSHOP_ADMIN_EMAIL: ${{ secrets.ADVANTSHOP_ADMIN_EMAIL }}
+          ADVANTSHOP_ADMIN_PASSWORD: ${{ secrets.ADVANTSHOP_ADMIN_PASSWORD }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+          FTP_REMOTE_PATH: ${{ secrets.FTP_REMOTE_PATH }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_SECURE: ${{ secrets.FTP_SECURE }}
+          SYNC_UPLOAD_MODE: admin
+          SYNC_OUT_FORMAT: csv2
+          SYNC_OUT_ENCODING: utf8
+          SYNC_ADMIN_ONLY_UPDATE: "true"
+          SYNC_POST_ENABLED: "true"
+          SYNC_SKIP_IF_UNCHANGED: "true"
+        run: node sync.mjs
