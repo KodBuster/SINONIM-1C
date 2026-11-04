@@ -511,7 +511,18 @@ export async function syncStocksViaAdminOffers({
    * на каждом updateOffer («Укажите цвет»). Подставляем Color/ColorId
    * с соседнего оффера, не трогая Size.
    */
-  function withRequiredColor(offer, productId) {
+  /** Пустая / пробельная ячейка → null (не писать 0 в AdvantShop). */
+function parseOptionalNumber(value) {
+  const s = String(value ?? "")
+    .trim()
+    .replace(/\s/g, "")
+    .replace(",", ".");
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function withRequiredColor(offer, productId) {
     const hasColorId =
       offer.ColorId != null && offer.ColorId !== 0 && offer.ColorId !== "";
     const hasColorName = String(offer.Color ?? "").trim() !== "";
@@ -562,16 +573,17 @@ export async function syncStocksViaAdminOffers({
     }
 
     const next = { ...found.offer };
-    const amount = Number(String(row.amount ?? "").replace(",", "."));
-    const price = Number(String(row.price ?? "").replace(",", "."));
-    if (Number.isFinite(amount)) next.Amount = amount;
-    if (Number.isFinite(price)) {
+    // Пустая ячейка → Number("")===0 → раньше затирали цену/остаток нулём.
+    const amount = parseOptionalNumber(row.amount);
+    const price = parseOptionalNumber(row.price);
+    if (amount != null) next.Amount = amount;
+    if (price != null) {
       next.BasePrice = price;
       if ("Price" in next) next.Price = price;
     }
     if (row.weight != null && String(row.weight).trim() !== "") {
-      const weightNum = Number(String(row.weight).replace(",", "."));
-      next.Weight = Number.isFinite(weightNum) ? weightNum : row.weight;
+      const weightNum = parseOptionalNumber(row.weight);
+      if (weightNum != null) next.Weight = weightNum;
     }
 
     const parentArt = String(row.artNo || "").trim();

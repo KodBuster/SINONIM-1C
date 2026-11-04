@@ -917,9 +917,8 @@ function normalizeNumber(value) {
 }
 
 /**
- * 1С иногда отдаёт несколько строк с одним ArtNo+OfferArtNo (разный Weight).
- * Повторный импорт таких дублей в AdvantShop сбивает «Главная» у модификации → цена 0 на витрине.
- * Оставляем последнюю строку по ключу (как в актуальном остатке AdvantShop).
+ * 1С иногда отдаёт несколько строк с одним ArtNo+OfferArtNo (разный Weight/Amount).
+ * Суммируем Amount, цену/вес/Set берём из последней непустой ячейки.
  */
 function dedupeStockRows(rows) {
   /** @type {Map<string, (typeof rows)[number]>} */
@@ -929,10 +928,29 @@ function dedupeStockRows(rows) {
 
   for (const row of rows) {
     const key = `${row.artNo}\0${row.offer}`;
-    if (byKey.has(key)) {
-      seenDupes.add(`${row.artNo}/${row.offer}`);
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, { ...row });
+      continue;
     }
-    byKey.set(key, row);
+    seenDupes.add(`${row.artNo}/${row.offer}`);
+    const a1 = Number(String(prev.amount ?? "").replace(",", ".")) || 0;
+    const a2 = Number(String(row.amount ?? "").replace(",", ".")) || 0;
+    const price = String(row.price ?? "").trim()
+      ? row.price
+      : prev.price;
+    const weight = String(row.weight ?? "").trim()
+      ? row.weight
+      : prev.weight;
+    const set = String(row.set ?? "").trim() ? row.set : prev.set;
+    byKey.set(key, {
+      ...prev,
+      ...row,
+      amount: String(a1 + a2),
+      price,
+      weight,
+      set,
+    });
   }
 
   return {
