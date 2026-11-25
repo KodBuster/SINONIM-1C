@@ -118,7 +118,7 @@ const config = {
   admin: {
     baseUrl: normalizeAdminBaseUrl(
       process.env.ADVANTSHOP_ADMIN_URL ||
-        "https://my.advantshop.net/437286-kfbw",
+        "https://profi.alfaseller.ru/437286-kfbw",
     ),
     email: envTrim("ADVANTSHOP_ADMIN_EMAIL"),
     password: envTrim("ADVANTSHOP_ADMIN_PASSWORD"),
@@ -156,10 +156,10 @@ function envTrim(name) {
   return String(v).trim();
 }
 
-/** Корень магазина на my.advantshop.net, без /adminv2/login?... */
+/** Корень админки магазина, без /adminv2/login?... */
 function normalizeAdminBaseUrl(raw) {
   let s = String(raw || "").trim();
-  if (!s) return "https://my.advantshop.net/437286-kfbw";
+  if (!s) return "https://profi.alfaseller.ru/437286-kfbw";
   try {
     const u = new URL(s);
     // часто копируют адрес из браузера: .../adminv2/login?frompage=closed
@@ -168,6 +168,12 @@ function normalizeAdminBaseUrl(raw) {
     let path = u.pathname.replace(/\/+$/, "");
     path = path.replace(/\/adminv\d+(?:\/.*)?$/i, "");
     path = path.replace(/\/login$/i, "");
+    // Старый адрес Sinonim перенаправляет форму входа на новый домен.
+    if (u.hostname === "my.advantshop.net" && path === "/437286-kfbw") {
+      u.protocol = "https:";
+      u.hostname = "profi.alfaseller.ru";
+      u.port = "";
+    }
     u.pathname = path || "/";
     return u.toString().replace(/\/$/, "");
   } catch {
